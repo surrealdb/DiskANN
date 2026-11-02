@@ -7,9 +7,19 @@
 # Only `surrealdb-diskann` is published. Its dependencies are the upstream crates.io releases of
 # `diskann-utils`, `diskann-vector` and `diskann-wide`, which this repository never publishes.
 #
-# Requires CARGO_REGISTRY_TOKEN. The token is only given to the upload step: the package is built
-# and verified beforehand without it, so no build script ever runs with the token in its
-# environment. Rust toolchain version is read from rust-toolchain.toml.
+# Two jobs, so that no code compiled from the dependency tree runs where the token is:
+#   - `verify` checks the tag and builds the packaged crate against the crates.io releases with
+#     default features, all features and no default features. It has no access to the token.
+#   - `publish` runs on a fresh runner after `verify` passes and only uploads
+#     (`cargo publish --no-verify`), so it compiles nothing and runs no build script.
+#
+# Requires CARGO_REGISTRY_TOKEN. Within this workflow only the `publish` job reads it, but as an
+# organization or repository secret it is readable by any workflow in this repository; the
+# `crates-io` environment does not restrict it. GitHub creates that environment, without
+# protection rules, on the first run that references it, so required reviewers only gate a
+# release if an admin configures them before its tag is pushed.
+#
+# Rust toolchain version is read from rust-toolchain.toml.
 
 name: Publish surrealdb-diskann to crates.io
 
@@ -33,16 +43,14 @@ permissions:
   contents: read
 
 jobs:
-  publish:
-    name: Publish surrealdb-diskann
+  verify:
+    name: Verify surrealdb-diskann
     runs-on: ubuntu-latest
-    environment: crates-io
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Rust
@@ -59,15 +67,41 @@ jobs:
           fi
           echo "TAG_VERSION=$TAG_VERSION" >> "$GITHUB_ENV"
 
-      - name: Verify tag is on its release branch
+      - name: Verify tag is the tip of its release branch
         run: |
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/release/v$TAG_VERSION"; then
-            echo "::error::Tag must point to a commit on release/v$TAG_VERSION"
+          BRANCH="release/v$TAG_VERSION"
+          BRANCH_SHA=$(git ls-remote --exit-code origin "refs/heads/$BRANCH" | cut -f1) || {
+            echo "::error::Branch $BRANCH does not exist"
+            exit 1
+          }
+          if [ "$BRANCH_SHA" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::Tag must point to the tip of $BRANCH ($BRANCH_SHA)"
             exit 1
           fi
 
-      - name: Package and verify
+      - name: Package and verify (default features)
         run: cargo package --locked -p surrealdb-diskann
+
+      - name: Package and verify (all features)
+        run: cargo package --locked -p surrealdb-diskann --all-features
+
+      - name: Package and verify (no default features)
+        run: cargo package --locked -p surrealdb-diskann --no-default-features
+
+  publish:
+    name: Publish surrealdb-diskann
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: crates-io
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: rustup show
 
       - name: Publish
         env:
