@@ -1,0 +1,75 @@
+# Publishes SurrealDB's build of `diskann` to crates.io as `surrealdb-diskann`.
+#
+# Trigger: push a tag `surrealdb-diskann-v{major}.{minor}.{patch}` at the tip of the matching
+# `release/v{major}.{minor}.{patch}` branch. The tag pattern deliberately does not match the
+# upstream `v*` tags that `publish.yml` publishes the whole workspace on.
+#
+# Only `surrealdb-diskann` is published. Its dependencies are the upstream crates.io releases of
+# `diskann-utils`, `diskann-vector` and `diskann-wide`, which this repository never publishes.
+#
+# Requires CARGO_REGISTRY_TOKEN. The token is only given to the upload step: the package is built
+# and verified beforehand without it, so no build script ever runs with the token in its
+# environment. Rust toolchain version is read from rust-toolchain.toml.
+
+name: Publish surrealdb-diskann to crates.io
+
+on:
+  push:
+    tags:
+      - 'surrealdb-diskann-v[0-9]+.[0-9]+.[0-9]+'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_BACKTRACE: 1
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish surrealdb-diskann
+    runs-on: ubuntu-latest
+    environment: crates-io
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust
+        run: rustup show
+
+      - name: Verify version matches tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#surrealdb-diskann-v}"
+          CRATE_VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "surrealdb-diskann") | .version')
+          if [ "$TAG_VERSION" != "$CRATE_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match surrealdb-diskann version ($CRATE_VERSION)"
+            exit 1
+          fi
+          echo "TAG_VERSION=$TAG_VERSION" >> "$GITHUB_ENV"
+
+      - name: Verify tag is on its release branch
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/release/v$TAG_VERSION"; then
+            echo "::error::Tag must point to a commit on release/v$TAG_VERSION"
+            exit 1
+          fi
+
+      - name: Package and verify
+        run: cargo package --locked -p surrealdb-diskann
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked --no-verify -p surrealdb-diskann
