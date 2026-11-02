@@ -6,19 +6,20 @@
 #     verify; then publish and tag if crates.io does not have that version yet and the pushed
 #     commit is still the tip of the branch
 #   - pull_request into such a branch → verify only, so the checks run before the merge
-# The branch must name the crate version, so each version has its own release branch, and a
-# push whose version crates.io already has (published or yanked) only verifies. Shipping a
-# change means a new `release/v{version}` branch with the bumped version.
+# The branch names the upstream release it is based on, and the crate version must share its
+# major and minor version, so `release/v0.61.0` can ship 0.61.0, then 0.61.1, and so on. A push
+# whose version crates.io already has (published or yanked) only verifies: shipping a change
+# means bumping the crate version in the same merge.
 #
 # Only `surrealdb-diskann` is published. Its dependencies are the upstream crates.io releases of
 # `diskann-utils`, `diskann-vector`, `diskann-wide` and, behind the `pipnn` feature,
 # `diskann-linalg`, none of which this repository publishes.
 #
 # Three jobs, so that no code compiled from the dependency tree runs where a credential is:
-#   - `verify` checks that the branch names the crate version, builds the packaged crate against
-#     the crates.io releases with default features, all features and no default features, then
-#     checks it for wasm32-unknown-unknown from a consumer crate, and decides whether to publish.
-#     It has no access to either token.
+#   - `verify` checks the crate version against the branch, runs the crate's tests, builds the
+#     packaged crate against the crates.io releases with default features, all features and no
+#     default features, then checks it for wasm32-unknown-unknown from a consumer crate, and
+#     decides whether to publish. It has no access to either token.
 #   - `publish` runs on a fresh runner and only uploads (`cargo publish --no-verify`), so it
 #     compiles nothing and runs no build script.
 #   - `tag` creates the tag through the GitHub API once crates.io has the version, even if the
@@ -29,11 +30,12 @@
 # The verify builds set RUSTFLAGS, which overrides the target-cpu and target-feature flags in
 # this repository's .cargo/config.toml: consumers of the published crate never see that file.
 #
-# Requires CARGO_REGISTRY_TOKEN. Within this workflow only the `publish` job reads it, but as an
-# organization or repository secret it is readable by any workflow in this repository; the
-# `crates-io` environment does not restrict it. GitHub creates that environment, without
-# protection rules, on the first run that references it, so required reviewers only gate a
-# release if an admin configures them before the release branch is pushed.
+# Requires CARGO_REGISTRY_TOKEN. Within this workflow only the `publish` job reads it. As an
+# organization or repository secret it is readable by any workflow in this repository; stored as
+# a secret of the `crates-io` environment, which takes precedence over a secret of the same name
+# at those levels, it is only given to jobs that use the environment. GitHub creates that
+# environment, without protection rules, on the first run that references it, so required
+# reviewers only gate a release if an admin configures them before the release branch is pushed.
 #
 # Rust toolchain version is read from rust-toolchain.toml.
 
@@ -65,6 +67,7 @@ jobs:
   verify:
     name: Verify surrealdb-diskann
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       version: ${{ steps.version.outputs.version }}
       publish: ${{ steps.decide.outputs.publish }}
@@ -76,7 +79,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        run: rustup show && rustup target add wasm32-unknown-unknown
+        run: rustup toolchain install --no-self-update && rustup target add wasm32-unknown-unknown
 
       - name: Verify version matches release branch
         id: version
@@ -85,12 +88,17 @@ jobs:
         run: |
           CRATE_VERSION=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "surrealdb-diskann") | .version')
-          if [ "release/v$CRATE_VERSION" != "$BRANCH" ]; then
-            echo "::error::surrealdb-diskann version ($CRATE_VERSION) does not match branch $BRANCH"
+          BRANCH_VERSION="${BRANCH#release/v}"
+          if [ -z "$CRATE_VERSION" ] \
+            || [ "$(cut -d. -f1,2 <<< "$CRATE_VERSION")" != "$(cut -d. -f1,2 <<< "$BRANCH_VERSION")" ]; then
+            echo "::error::surrealdb-diskann version ($CRATE_VERSION) is not a $BRANCH_VERSION patch release, as branch $BRANCH requires"
             exit 1
           fi
           echo "CRATE_VERSION=$CRATE_VERSION" >> "$GITHUB_ENV"
           echo "version=$CRATE_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: RUSTFLAGS='' cargo test --locked -p surrealdb-diskann
 
       - name: Package and verify (default features)
         run: RUSTFLAGS='' cargo package --locked -p surrealdb-diskann
@@ -163,6 +171,7 @@ jobs:
     needs: verify
     if: needs.verify.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: crates-io
 
     steps:
@@ -172,7 +181,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        run: rustup show
+        run: rustup toolchain install --no-self-update
 
       - name: Publish
         env:
@@ -184,6 +193,7 @@ jobs:
     needs: [verify, publish]
     if: always() && needs.verify.result == 'success' && needs.verify.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: write
 
