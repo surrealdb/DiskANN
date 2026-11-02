@@ -15,15 +15,21 @@
 # `diskann-utils`, `diskann-vector`, `diskann-wide` and, behind the `pipnn` feature,
 # `diskann-linalg`, none of which this repository publishes.
 #
-# Three jobs, so that no code compiled from the dependency tree runs where a credential is:
+# Four jobs, so that no code compiled from the dependency tree runs where a credential is, or
+# where the package an approver sees is produced:
 #   - `verify` checks the crate version against the branch, runs the crate's tests, builds the
 #     packaged crate against the crates.io releases with default features, all features and no
 #     default features, then checks it for wasm32-unknown-unknown from a consumer crate, and
 #     decides whether to publish. It has no access to either token.
-#   - `publish` runs on a fresh runner and only uploads (`cargo publish --no-verify`), so it
+#   - `review` packages the crate on a fresh runner without building it, records the package's
+#     SHA-256, and writes the run summary an approver reads before approving the `crates-io`
+#     deployment: commit, checksum, changes since the previous release, dependency requirements
+#     and the files in the package.
+#   - `publish` runs on a fresh runner, packages again and refuses to upload unless the SHA-256
+#     is the one `review` recorded, then only uploads (`cargo publish --no-verify`), so it
 #     compiles nothing and runs no build script.
-#   - `tag` creates the tag through the GitHub API once crates.io has the version, even if the
-#     `publish` job failed after its upload landed, so re-running `tag` alone recovers. A tag
+#   - `tag` creates the tag through the GitHub API once crates.io has the version with the
+#     recorded checksum, even if the `publish` job failed after its upload landed. A tag
 #     created with GITHUB_TOKEN starts no workflow run, and the tag name does not match the
 #     upstream `v*` tags that `publish.yml` publishes the whole workspace on.
 #
@@ -166,13 +172,132 @@ jobs:
           fi
           echo "publish=true" >> "$GITHUB_OUTPUT"
 
+  review:
+    name: Summarise the package for approval
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha256: ${{ steps.package.outputs.sha256 }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Install Rust
+        run: rustup toolchain install --no-self-update
+
+      - name: Package without building
+        id: package
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          cargo package --locked --no-verify -p surrealdb-diskann
+          SHA256=$(sha256sum "target/package/surrealdb-diskann-$VERSION.crate" | cut -d' ' -f1)
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      # The changes are listed against the previous release in the same major.minor series, or,
+      # for the first one, against the upstream release the branch is named after.
+      - name: Write the approval summary
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          PUBLISH: ${{ needs.verify.outputs.publish }}
+          SHA256: ${{ steps.package.outputs.sha256 }}
+          BRANCH: ${{ github.event_name == 'push' && github.ref_name || github.base_ref }}
+          UPSTREAM: microsoft/DiskANN
+        run: |
+          CRATE="target/package/surrealdb-diskann-$VERSION.crate"
+          COMMIT=$(git rev-parse HEAD)
+          SERIES=$(cut -d. -f1,2 <<< "$VERSION")
+          BASE_TAG=$({ git tag --list "surrealdb-diskann-v$SERIES.*"; echo "surrealdb-diskann-v$VERSION"; } \
+            | sort -V -u | grep -B1 -x "surrealdb-diskann-v$VERSION" | sed '$d')
+          if [ -n "$BASE_TAG" ]; then
+            BASE_NAME="$BASE_TAG"
+            BASE=$(git rev-parse "$BASE_TAG^{commit}")
+          else
+            BASE_NAME="$UPSTREAM v${BRANCH#release/v}"
+            BASE=$(git ls-remote "https://github.com/$UPSTREAM" \
+              "refs/tags/v${BRANCH#release/v}" "refs/tags/v${BRANCH#release/v}^{}" | tail -n1 | cut -f1)
+          fi
+          {
+            echo "## surrealdb-diskann $VERSION"
+            echo
+            if [ "$PUBLISH" = true ]; then
+              echo "Approving the \`crates-io\` deployment uploads this package to crates.io and tags"
+              echo "its commit \`surrealdb-diskann-v$VERSION\`. The publish job refuses to upload a package"
+              echo "with any other SHA-256, and the tag job checks crates.io's checksum before tagging."
+            else
+              echo "This run does not publish: it is a pull request, crates.io already has this version,"
+              echo "or the branch has moved on to a newer commit."
+            fi
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Branch | \`$BRANCH\` |"
+            echo "| Commit | [\`${COMMIT:0:12}\`]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$COMMIT) |"
+            echo "| Package SHA-256 | \`$SHA256\` |"
+            echo "| Package size | $(wc -c < "$CRATE" | tr -d ' ') bytes |"
+            echo
+            echo "### Changes since $BASE_NAME"
+            echo
+            if [ -z "$BASE" ]; then
+              echo "No \`v${BRANCH#release/v}\` tag found in $UPSTREAM to compare against."
+              echo
+            else
+              echo "[Compare on GitHub]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$BASE...$COMMIT)"
+              echo
+            fi
+            if [ -n "$BASE" ] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+              echo "<details><summary>Commits</summary>"
+              echo
+              echo '```'
+              git log --oneline --no-decorate "$BASE..$COMMIT"
+              echo '```'
+              echo "</details>"
+              echo
+              echo "<details><summary>Files changed</summary>"
+              echo
+              echo '```'
+              git diff --stat "$BASE" "$COMMIT"
+              echo '```'
+              echo "</details>"
+              echo
+            fi
+            echo "### Dependency requirements in the published manifest"
+            echo
+            echo "| Crate | Requirement | Target |"
+            echo "|---|---|---|"
+            tar -xzOf "$CRATE" "surrealdb-diskann-$VERSION/Cargo.toml" | awk '
+              /^\[(target\..*\.)?dependencies\./ {
+                name = $0; sub(/^.*dependencies\./, "", name); sub(/\]$/, "", name)
+                target = "all"
+                if ($0 ~ /^\[target\./) { target = $0; sub(/^\[target\./, "", target); sub(/\.dependencies\..*$/, "", target); gsub(/\x27/, "", target); target = "`" target "`" }
+                next
+              }
+              /^\[/ { name = "" }
+              name != "" && /^version = / { v = $3; gsub(/"/, "", v); print "| `" name "` | `" v "` | " target " |"; name = "" }'
+            echo
+            echo "<details><summary>Files in the package ($(tar -tzf "$CRATE" | awk 'END { print NR }'))</summary>"
+            echo
+            echo '```'
+            tar -tzf "$CRATE"
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   publish:
     name: Publish surrealdb-diskann
-    needs: verify
+    needs: [verify, review]
     if: needs.verify.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: crates-io
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/surrealdb-diskann/${{ needs.verify.outputs.version }}
 
     steps:
       - name: Checkout repository
@@ -183,6 +308,19 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install --no-self-update
 
+      # Packaging is deterministic, so `cargo publish` below packages this same file again.
+      - name: Check the package is the approved one
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          APPROVED: ${{ needs.review.outputs.sha256 }}
+        run: |
+          cargo package --locked --no-verify -p surrealdb-diskann
+          ACTUAL=$(sha256sum "target/package/surrealdb-diskann-$VERSION.crate" | cut -d' ' -f1)
+          if [ "$ACTUAL" != "$APPROVED" ]; then
+            echo "::error::Package SHA-256 $ACTUAL is not the approved $APPROVED; not publishing"
+            exit 1
+          fi
+
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -190,23 +328,29 @@ jobs:
 
   tag:
     name: Tag the published commit
-    needs: [verify, publish]
-    if: always() && needs.verify.result == 'success' && needs.verify.outputs.publish == 'true'
+    needs: [verify, review, publish]
+    if: >-
+      always() && needs.verify.result == 'success' && needs.review.result == 'success'
+      && needs.verify.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: write
 
     steps:
-      - name: Verify crates.io has the version
+      - name: Verify crates.io has the approved package
         env:
           VERSION: ${{ needs.verify.outputs.version }}
+          APPROVED: ${{ needs.review.outputs.sha256 }}
         run: |
-          STATUS=$(curl -sS -o /dev/null -w '%{http_code}' \
+          CHECKSUM=$(curl -sS --fail \
             -A 'surrealdb/DiskANN publish workflow (https://github.com/surrealdb/DiskANN)' \
-            "https://crates.io/api/v1/crates/surrealdb-diskann/$VERSION")
-          if [ "$STATUS" != 200 ]; then
-            echo "::error::crates.io returned HTTP $STATUS for surrealdb-diskann $VERSION; not tagging"
+            "https://crates.io/api/v1/crates/surrealdb-diskann/$VERSION" | jq -r .version.checksum) || {
+            echo "::error::crates.io has no surrealdb-diskann $VERSION; not tagging"
+            exit 1
+          }
+          if [ "$CHECKSUM" != "$APPROVED" ]; then
+            echo "::error::crates.io has surrealdb-diskann $VERSION with SHA-256 $CHECKSUM, not the approved $APPROVED; not tagging"
             exit 1
           fi
 
