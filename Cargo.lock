@@ -431,33 +431,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "diskann"
-version = "0.61.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "dashmap",
- "diskann-linalg",
- "diskann-utils",
- "diskann-vector",
- "diskann-wide",
- "futures-util",
- "half",
- "hashbrown 0.16.1",
- "num-traits",
- "pin-project",
- "rand",
- "relative-path 2.0.1",
- "rstest",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "wasm-bindgen-futures",
-]
-
-[[package]]
 name = "diskann-benchmark"
 version = "0.61.0"
 dependencies = [
@@ -467,7 +440,6 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "clap",
- "diskann",
  "diskann-benchmark-core",
  "diskann-benchmark-runner",
  "diskann-bftree",
@@ -491,6 +463,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
+ "surrealdb-diskann",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -501,13 +474,13 @@ name = "diskann-benchmark-core"
 version = "0.61.0"
 dependencies = [
  "anyhow",
- "diskann",
  "diskann-benchmark-runner",
  "diskann-utils",
  "diskann-vector",
  "futures-util",
  "itertools 0.13.0",
  "serde_yaml",
+ "surrealdb-diskann",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -550,7 +523,6 @@ version = "0.61.0"
 dependencies = [
  "bf-tree",
  "bytemuck",
- "diskann",
  "diskann-providers",
  "diskann-quantization",
  "diskann-utils",
@@ -561,6 +533,7 @@ dependencies = [
  "rstest",
  "serde",
  "serde_json",
+ "surrealdb-diskann",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -577,7 +550,6 @@ dependencies = [
  "byteorder",
  "cfg-if",
  "criterion",
- "diskann",
  "diskann-linalg",
  "diskann-providers",
  "diskann-quantization",
@@ -595,6 +567,7 @@ dependencies = [
  "rayon",
  "rstest",
  "serde",
+ "surrealdb-diskann",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -610,7 +583,6 @@ dependencies = [
  "bytemuck",
  "crossbeam",
  "dashmap",
- "diskann",
  "diskann-providers",
  "diskann-quantization",
  "diskann-utils",
@@ -619,6 +591,7 @@ dependencies = [
  "parking_lot",
  "rand",
  "strum",
+ "surrealdb-diskann",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -631,7 +604,6 @@ dependencies = [
  "bytemuck",
  "crossbeam-queue",
  "dashmap",
- "diskann",
  "diskann-benchmark-core",
  "diskann-benchmark-runner",
  "diskann-quantization",
@@ -644,6 +616,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
+ "surrealdb-diskann",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -656,7 +629,6 @@ dependencies = [
  "anyhow",
  "bf-tree",
  "criterion",
- "diskann",
  "diskann-utils",
  "diskann-vector",
  "futures-util",
@@ -667,6 +639,7 @@ dependencies = [
  "scc",
  "serde",
  "serde_json",
+ "surrealdb-diskann",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
@@ -696,7 +669,6 @@ dependencies = [
  "bytemuck",
  "byteorder",
  "cfg-if",
- "diskann",
  "diskann-quantization",
  "diskann-utils",
  "diskann-vector",
@@ -713,6 +685,7 @@ dependencies = [
  "rayon",
  "rstest",
  "serde",
+ "surrealdb-diskann",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -761,7 +734,6 @@ dependencies = [
  "bytemuck",
  "byteorder",
  "clap",
- "diskann",
  "diskann-benchmark-core",
  "diskann-label-filter",
  "diskann-providers",
@@ -779,6 +751,7 @@ dependencies = [
  "rstest",
  "serde",
  "serde_json",
+ "surrealdb-diskann",
  "tracing",
  "tracing-subscriber",
  "vfs",
@@ -2344,6 +2317,33 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "surrealdb-diskann"
+version = "0.61.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "dashmap",
+ "diskann-linalg",
+ "diskann-utils",
+ "diskann-vector",
+ "diskann-wide",
+ "futures-util",
+ "half",
+ "hashbrown 0.16.1",
+ "num-traits",
+ "pin-project",
+ "rand",
+ "relative-path 2.0.1",
+ "rstest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

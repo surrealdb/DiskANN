@@ -1,11 +1,18 @@
 [package]
-name = "diskann"
+# SurrealDB's build of Microsoft's `diskann`: the upstream release this branch is based on, plus
+# support for 32-bit wasm targets (including `wasm32-unknown-unknown`). Its library is still named
+# `diskann`, and it depends on the upstream releases of `diskann-utils`, `diskann-vector` and
+# `diskann-wide`.
+name = "surrealdb-diskann"
 version.workspace = true
-description.workspace = true
+description = "SurrealDB's build of Microsoft's DiskANN graph index, with support for 32-bit wasm targets including wasm32-unknown-unknown."
 authors.workspace = true
-repository.workspace = true
+repository = "https://github.com/surrealdb/DiskANN"
 license.workspace = true
 edition = "2024"
+
+[lib]
+name = "diskann"
 
 [package.metadata.docs.rs]
 default-target = "x86_64-pc-windows-msvc"
