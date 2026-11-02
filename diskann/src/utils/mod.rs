@@ -4,6 +4,7 @@
  */
 
 pub mod async_tools;
+pub mod task;
 
 #[expect(clippy::module_inception)]
 pub mod utils;

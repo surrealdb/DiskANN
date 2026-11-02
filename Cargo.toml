@@ -59,7 +59,8 @@ diskann-linalg = { path = "diskann-linalg", version = "0.61.0" }
 diskann-utils = { path = "diskann-utils", default-features = false, version = "0.61.0" }
 diskann-quantization = { path = "diskann-quantization", default-features = false, version = "0.61.0" }
 # Algorithm
-diskann = { path = "diskann", version = "0.61.0" }
+# Published as `surrealdb-diskann`; the library keeps the name `diskann`.
+diskann = { path = "diskann", version = "0.61.0", package = "surrealdb-diskann" }
 # Providers
 diskann-providers = { path = "diskann-providers", default-features = false, version = "0.61.0" }
 diskann-inmem = { path = "diskann-inmem", default-features = false, version = "0.61.0" }
