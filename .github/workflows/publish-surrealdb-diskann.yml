@@ -1,17 +1,26 @@
 # Publishes SurrealDB's build of `diskann` to crates.io as `surrealdb-diskann`.
 #
-# Trigger: push a tag `surrealdb-diskann-v{major}.{minor}.{patch}` at the tip of the matching
-# `release/v{major}.{minor}.{patch}` branch. The tag pattern deliberately does not match the
-# upstream `v*` tags that `publish.yml` publishes the whole workspace on.
+# Triggers:
+#   - push a tag `surrealdb-diskann-v{major}.{minor}.{patch}` at the tip of the matching
+#     `release/v{major}.{minor}.{patch}` branch → verify, then publish
+#   - pull_request into a `release/v{major}.{minor}.{patch}` branch → verify only, so the checks
+#     run before anything is tagged
+# The tag pattern deliberately does not match the upstream `v*` tags that `publish.yml` publishes
+# the whole workspace on.
 #
 # Only `surrealdb-diskann` is published. Its dependencies are the upstream crates.io releases of
-# `diskann-utils`, `diskann-vector` and `diskann-wide`, which this repository never publishes.
+# `diskann-utils`, `diskann-vector`, `diskann-wide` and, behind the `pipnn` feature,
+# `diskann-linalg`, none of which this repository publishes.
 #
 # Two jobs, so that no code compiled from the dependency tree runs where the token is:
-#   - `verify` checks the tag and builds the packaged crate against the crates.io releases with
-#     default features, all features and no default features. It has no access to the token.
-#   - `publish` runs on a fresh runner after `verify` passes and only uploads
-#     (`cargo publish --no-verify`), so it compiles nothing and runs no build script.
+#   - `verify` builds the packaged crate against the crates.io releases with default features,
+#     all features and no default features, then checks it for wasm32-unknown-unknown from a
+#     consumer crate. On a tag push it also checks the tag. It has no access to the token.
+#   - `publish` runs on a fresh runner after `verify` passes, on a tag push only, and only
+#     uploads (`cargo publish --no-verify`), so it compiles nothing and runs no build script.
+#
+# The verify builds set RUSTFLAGS, which overrides the target-cpu and target-feature flags in
+# this repository's .cargo/config.toml: consumers of the published crate never see that file.
 #
 # Requires CARGO_REGISTRY_TOKEN. Within this workflow only the `publish` job reads it, but as an
 # organization or repository secret it is readable by any workflow in this repository; the
@@ -27,6 +36,9 @@ on:
   push:
     tags:
       - 'surrealdb-diskann-v[0-9]+.[0-9]+.[0-9]+'
+  pull_request:
+    branches:
+      - 'release/v[0-9]+.[0-9]+.[0-9]+'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -54,22 +66,31 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        run: rustup show
+        run: rustup show && rustup target add wasm32-unknown-unknown
 
-      - name: Verify version matches tag
+      - name: Read crate version
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#surrealdb-diskann-v}"
           CRATE_VERSION=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "surrealdb-diskann") | .version')
+          if [ -z "$CRATE_VERSION" ]; then
+            echo "::error::No surrealdb-diskann package in this workspace"
+            exit 1
+          fi
+          echo "CRATE_VERSION=$CRATE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Verify version matches tag
+        if: github.event_name == 'push'
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#surrealdb-diskann-v}"
           if [ "$TAG_VERSION" != "$CRATE_VERSION" ]; then
             echo "::error::Tag version ($TAG_VERSION) does not match surrealdb-diskann version ($CRATE_VERSION)"
             exit 1
           fi
-          echo "TAG_VERSION=$TAG_VERSION" >> "$GITHUB_ENV"
 
       - name: Verify tag is the tip of its release branch
+        if: github.event_name == 'push'
         run: |
-          BRANCH="release/v$TAG_VERSION"
+          BRANCH="release/v$CRATE_VERSION"
           BRANCH_SHA=$(git ls-remote --exit-code origin "refs/heads/$BRANCH" | cut -f1) || {
             echo "::error::Branch $BRANCH does not exist"
             exit 1
@@ -80,17 +101,48 @@ jobs:
           fi
 
       - name: Package and verify (default features)
-        run: cargo package --locked -p surrealdb-diskann
+        run: RUSTFLAGS='' cargo package --locked -p surrealdb-diskann
 
       - name: Package and verify (all features)
-        run: cargo package --locked -p surrealdb-diskann --all-features
+        run: RUSTFLAGS='' cargo package --locked -p surrealdb-diskann --all-features
 
       - name: Package and verify (no default features)
-        run: cargo package --locked -p surrealdb-diskann --no-default-features
+        run: RUSTFLAGS='' cargo package --locked -p surrealdb-diskann --no-default-features
+
+      # A library cannot be verified for wasm32-unknown-unknown on its own: `getrandom` (through
+      # `rand`) makes the final crate opt in to its JavaScript backend with the `wasm_js` feature
+      # and the `getrandom_backend` cfg. A throwaway consumer of the unpacked package does that, as
+      # SurrealDB does, seeded with the package's lockfile. It runs from the repository root so the
+      # pinned toolchain applies.
+      - name: Check packaged crate for wasm32-unknown-unknown
+        run: |
+          PKG="$PWD/target/package/surrealdb-diskann-$CRATE_VERSION"
+          CONSUMER="$RUNNER_TEMP/wasm-consumer"
+          mkdir -p "$CONSUMER/src"
+          cat > "$CONSUMER/Cargo.toml" <<EOF
+          [package]
+          name = "wasm-consumer"
+          version = "0.0.0"
+          edition = "2024"
+          publish = false
+
+          [dependencies]
+          diskann = { package = "surrealdb-diskann", path = "$PKG" }
+          getrandom = { version = "0.3", features = ["wasm_js"] }
+
+          [workspace]
+          EOF
+          echo 'pub use diskann;' > "$CONSUMER/src/lib.rs"
+          cp "$PKG/Cargo.lock" "$CONSUMER/Cargo.lock"
+          export RUSTFLAGS='--cfg getrandom_backend="wasm_js"'
+          cargo check --manifest-path "$CONSUMER/Cargo.toml" --target wasm32-unknown-unknown
+          cargo check --manifest-path "$CONSUMER/Cargo.toml" --target wasm32-unknown-unknown \
+            --features diskann/pipnn,diskann/testing,diskann/experimental_diversity_search
 
   publish:
     name: Publish surrealdb-diskann
     needs: verify
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: crates-io
 
