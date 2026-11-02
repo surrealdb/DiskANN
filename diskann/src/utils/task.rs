@@ -9,17 +9,17 @@
 //! inside a runtime context, as for [`tokio::spawn`].
 //!
 //! On `wasm32-unknown-unknown` (browsers and edge workers) there is no tokio runtime and no
-//! threads. There a spawned future does not start on its own: it runs when its handle is
-//! awaited (or, in a [`JoinSet`], when [`JoinSet::join_next`] reaches it), on the awaiting
-//! task. Every call site already awaits its handles before using what they produce, and no
-//! spawned future waits on another, so the work completes in the same order-independent way,
-//! one task after another.
+//! threads. There a spawned future runs on the JavaScript event loop through
+//! `wasm_bindgen_futures::spawn_local`, concurrently with the spawner and with every other
+//! spawned future, so futures that wait on one another (a provider that batches requests from
+//! several tasks, say) make progress as they do under tokio. As with tokio, dropping a handle
+//! detaches its task rather than cancelling it.
 
-#[cfg(not(any(all(target_family = "wasm", target_os = "unknown"), diskann_inline_tasks)))]
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 pub use tokio::task::{JoinError, JoinHandle, JoinSet};
 
 /// Spawns `future` as a task and returns its handle.
-#[cfg(not(any(all(target_family = "wasm", target_os = "unknown"), diskann_inline_tasks)))]
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
 where
     F: std::future::Future + Send + 'static,
@@ -28,11 +28,11 @@ where
     tokio::spawn(future)
 }
 
-#[cfg(any(all(target_family = "wasm", target_os = "unknown"), diskann_inline_tasks))]
-pub use inline::{JoinError, JoinHandle, JoinSet, spawn};
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+pub use local::{JoinError, JoinHandle, JoinSet, spawn};
 
-#[cfg(any(all(target_family = "wasm", target_os = "unknown"), diskann_inline_tasks))]
-mod inline {
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+mod local {
     use std::{
         collections::VecDeque,
         fmt,
@@ -41,46 +41,61 @@ mod inline {
         task::{Context, Poll},
     };
 
-    /// The error of a task that did not complete. Inline tasks always complete, so this is
-    /// never constructed; it exists so call sites match on the same `Result` as with tokio.
+    use tokio::sync::oneshot;
+
+    /// The error of a task that ended without producing its output: it panicked, or the
+    /// executor dropped it before it completed.
     #[derive(Debug)]
-    pub enum JoinError {}
+    pub struct JoinError;
 
     impl fmt::Display for JoinError {
-        fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match *self {}
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("task ended without producing its output")
         }
     }
 
     impl std::error::Error for JoinError {}
 
-    /// A spawned future that runs when this handle is awaited.
+    /// The output of a spawned task, available once the task completes.
     pub struct JoinHandle<T> {
-        future: Pin<Box<dyn Future<Output = T> + Send>>,
+        output: oneshot::Receiver<T>,
     }
 
     impl<T> Future for JoinHandle<T> {
         type Output = Result<T, JoinError>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            self.future.as_mut().poll(cx).map(Ok)
+            Pin::new(&mut self.output)
+                .poll(cx)
+                .map(|output| output.map_err(|_| JoinError))
         }
     }
 
-    /// Wraps `future` in a handle that runs it when awaited.
+    /// Spawns `future` on the JavaScript event loop and returns its handle.
     pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        JoinHandle {
-            future: Box::pin(future),
-        }
+        let (done, output) = oneshot::channel();
+        wasm_bindgen_futures::spawn_local(async move {
+            // The send fails only when the handle was dropped, which detaches the task: its
+            // output has no reader.
+            let _ = done.send(future.await);
+        });
+        JoinHandle { output }
     }
 
-    /// A set of spawned futures, run one at a time, in spawn order, by [`Self::join_next`].
+    /// A set of spawned tasks, which all run concurrently from the moment they are spawned.
+    /// [`Self::join_next`] returns their outputs in spawn order.
     pub struct JoinSet<T> {
         pending: VecDeque<JoinHandle<T>>,
+    }
+
+    impl<T: Send + 'static> Default for JoinSet<T> {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl<T: Send + 'static> JoinSet<T> {
@@ -97,8 +112,8 @@ mod inline {
             self.pending.push_back(spawn(future));
         }
 
-        /// Runs the next task to completion and returns its output, or `None` once the set
-        /// is empty.
+        /// Waits for the earliest-spawned task still in the set and returns its output, or
+        /// `None` once the set is empty.
         pub async fn join_next(&mut self) -> Option<Result<T, JoinError>> {
             let handle = self.pending.pop_front()?;
             Some(handle.await)
