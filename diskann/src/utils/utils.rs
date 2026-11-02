@@ -65,30 +65,24 @@ pub unsafe trait IntoUsize {
 }
 
 macro_rules! impl_to_usize {
-    ($type:ty) => {
-        /// SAFETY: We have checked that the target pointer width is 64-bits, meaning we are on
-        /// a 64-bit system so the conversion is lossless.
-        #[cfg(target_pointer_width = "64")]
+    ($type:ty, $min_bits:literal) => {
+        /// SAFETY: `usize` is at least `$min_bits` wide on the targets this impl is compiled
+        /// for, and `$type` is no wider than that, so the conversion is lossless.
         unsafe impl IntoUsize for $type {
             fn into_usize(self) -> usize {
-                // This breaks at compile time if somehow the `cfg` guard above fails.
-                const _: () = {
-                    if usize::BITS != 64 {
-                        panic!("diskann is not compatible with non-64-bit systems");
-                    }
-                };
-
+                const _: () = assert!(usize::BITS >= $min_bits && <$type>::BITS <= usize::BITS);
                 self as usize
             }
         }
     };
 }
 
-impl_to_usize!(u8);
-impl_to_usize!(u16);
-impl_to_usize!(u32);
-impl_to_usize!(u64);
-impl_to_usize!(usize);
+impl_to_usize!(u8, 32);
+impl_to_usize!(u16, 32);
+impl_to_usize!(u32, 32);
+#[cfg(target_pointer_width = "64")]
+impl_to_usize!(u64, 64);
+impl_to_usize!(usize, 32);
 
 /// Return the name of a type.
 ///
